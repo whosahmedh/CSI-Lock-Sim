@@ -54,7 +54,7 @@ FEATURE_SIZE       = SUBCARRIERS * TIME_STEPS
 # BLE pairing window: how many "ticks" the BLE radio stays
 # in advertising mode after a gesture is detected before
 # automatically returning to dormant/sensing mode
-BLE_WINDOW_TICKS   = 5
+BLE_WINDOW_TICKS   = 1
 
 # Paths
 RF_MODEL_PATH      = os.path.join("models", "rf_model.joblib")
@@ -258,7 +258,12 @@ class VirtualESP32:
         cnn_input    = filtered.reshape(
             SUBCARRIERS, TIME_STEPS
         ).astype(np.float32)
-        mn, mx       = cnn_input.min(), cnn_input.max()
+
+        # Use GLOBAL min/max saved during Phase 2 training
+        # to ensure inference preprocessing matches training
+        norm_path    = os.path.join("data", "norm_params.npy")
+        norm_params  = np.load(norm_path)
+        mn, mx       = norm_params[0], norm_params[1]
         cnn_norm     = (cnn_input - mn) / (mx - mn + 1e-8)
         return features_rf, cnn_norm
 
@@ -317,11 +322,15 @@ class VirtualESP32:
         pairing_outcome, accepted = \
             ble_stack.handle_pairing_request()
 
+        # Capture state BEFORE tick so the plot reflects
+        # the state that was active when the decision was made
+        active_state = ble_stack.state
+
         # Tick the BLE window countdown
         ble_stack.tick()
 
         return pred_class, confidence, \
-               ble_stack.state, pairing_outcome, accepted
+               active_state, pairing_outcome, accepted
 
 
 # ============================================================
@@ -430,35 +439,57 @@ def run_simulation():
     print("\n[4/5] Generating state machine timeline plot...")
 
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(14, 6), sharex=True)
+        2, 1, figsize=(14, 7), sharex=True)
     fig.suptitle(
         "CSI-Lock-Sim | Phase 5: Secure Lockdown "
         "State Machine Timeline",
-        fontsize=12, fontweight="bold"
+        fontsize=13, fontweight="bold"
     )
 
-    # Top plot — BLE state over time
-    ax1.fill_between(
-        sample_numbers, ble_states,
-        step="post", alpha=0.6,
-        color="green", label="ADVERTISING (unlocked)"
-    )
-    ax1.fill_between(
-        sample_numbers,
-        [1 - s for s in ble_states],
-        step="post", alpha=0.3,
-        color="grey", label="DORMANT (locked)"
-    )
-    ax1.set_yticks([0, 1])
-    ax1.set_yticklabels(["DORMANT", "ADVERTISING"])
-    ax1.set_ylabel("BLE State")
-    ax1.legend(loc="upper right", fontsize=8)
+    # ── TOP PANEL: BLE unlock events ──────────────────────────
+    # Grey background = DORMANT (default / secure state)
+    ax1.axhspan(0, 1, color="lightgrey", alpha=0.4,
+                label="DORMANT — Secure Lockdown (default)")
+
+    # Green vertical line at every unlock event
+    unlock_samples = [s for s, state in
+                      zip(sample_numbers, ble_states)
+                      if state == 1]
+
+    for s in unlock_samples:
+        ax1.axvline(x=s, color="green",
+                    linewidth=2.5, alpha=0.85)
+
+    # Dummy line for legend
+    if unlock_samples:
+        ax1.axvline(x=unlock_samples[0], color="green",
+                    linewidth=2.5, alpha=0.85,
+                    label="ADVERTISING — BLE pairing window open")
+
+    ax1.set_ylim(0, 1)
+    ax1.set_yticks([])
+    ax1.set_ylabel("BLE State", fontsize=10)
+    ax1.legend(loc="upper right", fontsize=9)
     ax1.set_title(
-        "BLE Radio State "
-        "(DORMANT = Secure Lockdown / "
-        "ADVERTISING = Pairing Window Open)")
+        f"BLE Radio Unlock Events  "
+        f"(green line = window opened by detected gesture  |  "
+        f"grey = DORMANT / locked)  "
+        f"[{len(unlock_samples)} unlock events]",
+        fontsize=9
+    )
 
-    # Bottom plot — true class colour bands
+    # Annotate unlock count
+    ax1.text(
+        0.01, 0.75,
+        f"Unlock events : {len(unlock_samples)}\n"
+        f"Total samples : {len(sample_numbers)}",
+        transform=ax1.transAxes,
+        fontsize=8, verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="white",
+                  alpha=0.7)
+    )
+
+    # ── BOTTOM PANEL: True class colour bands ─────────────────
     class_colours = {
         "GESTURE":        "green",
         "NOT_GESTURE":    "steelblue",
@@ -469,20 +500,41 @@ def run_simulation():
     for i, row in log_df.iterrows():
         col = class_colours.get(row["true_class"], "grey")
         ax2.axvspan(i - 0.5, i + 0.5,
-                    color=col, alpha=0.4)
+                    color=col, alpha=0.45)
+
+    # Overlay a marker on top of unlock events in bottom panel
+    for s in unlock_samples:
+        ax2.axvline(x=s, color="darkgreen",
+                    linewidth=1.5, alpha=0.6,
+                    linestyle="--")
 
     legend_patches = [
-        mpatches.Patch(color=c, alpha=0.6, label=lbl)
+        mpatches.Patch(color=c, alpha=0.7, label=lbl)
         for lbl, c in class_colours.items()
     ]
-    ax2.set_ylabel("True Sample Class")
-    ax2.set_xlabel("Sample Number")
+    legend_patches.append(
+        mpatches.Patch(color="darkgreen", alpha=0.6,
+                       label="Unlock event (dashed)")
+    )
+
+    ax2.set_ylabel("True Sample Class", fontsize=10)
+    ax2.set_xlabel("Sample Number", fontsize=10)
+    ax2.set_xlim(-1, len(sample_numbers))
     ax2.set_yticks([])
-    ax2.set_title("True Sample Class per Step")
+    ax2.set_title(
+        "True Sample Class per Step  "
+        "(green bands = GESTURE  |  dashed = unlock triggered)",
+        fontsize=9
+    )
     ax2.legend(handles=legend_patches,
                loc="upper right", fontsize=8)
 
     plt.tight_layout()
+
+    # Delete old file first to avoid Windows file-lock issues
+    if os.path.exists(PLOT_PATH):
+        os.remove(PLOT_PATH)
+
     plt.savefig(PLOT_PATH, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"      Plot saved to : {PLOT_PATH}")

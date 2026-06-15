@@ -193,12 +193,20 @@ cnn_data = filtered_data.reshape(
     -1, SUBCARRIERS, TIME_STEPS).astype(np.float32)
 
 # Min-max normalisation: scales all values to 0.0 – 1.0
+# Save the global min/max so Phase 5 uses the SAME scale
 min_val  = cnn_data.min()
 max_val  = cnn_data.max()
 cnn_norm = (cnn_data - min_val) / (max_val - min_val + 1e-8)
 
 np.save(CNN_OUTPUT_PATH, cnn_norm)
 np.save(LABELS_PATH,     labels)
+
+# Save normalisation parameters for consistent inference
+norm_params = np.array([min_val, max_val])
+np.save(os.path.join("data", "norm_params.npy"), norm_params)
+print(f"      Norm params saved  : data/norm_params.npy")
+print(f"      Global min         : {min_val:.6f}")
+print(f"      Global max         : {max_val:.6f}")
 
 print(f"      CNN array shape : {cnn_norm.shape}")
 print(f"      Value range     : {cnn_norm.min():.3f} – "
